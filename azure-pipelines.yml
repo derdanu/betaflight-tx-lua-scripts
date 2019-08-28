@@ -20,6 +20,23 @@ steps:
     script: |
       ./bin/build.sh
 
+- task: ArchiveFiles@2
+  inputs:
+    rootFolderOrFile: '$(Build.SourcesDirectory)/obj'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/betalight-lua-derdanu-b$(Build.BuildId).zip'
+    replaceExistingArchive: true
+    
+- task: AzureFileCopy@3
+  inputs:
+    SourcePath: '$(Build.ArtifactStagingDirectory)/betalight-lua-derdanu-b$(Build.BuildId).zip'
+    azureSubscription: 'Microsoft Azure Internal Consumption(6e8fd20c-17b0-4457-bea7-d20b50f95c95)'
+    Destination: 'AzureBlob'
+    storage: 'derdanugithub'
+    ContainerName: 'betaflight-tx-lua-derdanu'
+
+
 - task: PublishPipelineArtifact@1
   inputs:
     targetPath: '$(Build.SourcesDirectory)/obj'
