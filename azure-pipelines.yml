@@ -31,5 +31,5 @@ steps:
 
 - task: PublishPipelineArtifact@1
   inputs:
-    targetPath: '$(Build.ArtifactStagingDirectory)/betalight-lua-derdanu-b$(Build.BuildId).zip'
-    artifact: 'betalight-lua-derdanu-b$(Build.BuildId).zip'
+    targetPath: '$(Build.SourcesDirectory)/obj'
+    artifact: 'betalight-lua-derdanu-b$(Build.BuildId)'
