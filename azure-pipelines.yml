@@ -7,15 +7,15 @@ trigger:
 - master
 
 pool:
-  vmImage: 'ubuntu-latest'
+  vmImage: 'ubuntu-18.04'
 
 steps:
 - task: Bash@3
   inputs:
     targetType: 'inline'
     script: |
-      apt-get update 
-      apt-get install lua5.2
+      sudo apt-get update 
+      sudo apt-get install lua5.2
 
 - task: Bash@3  
   inputs:
