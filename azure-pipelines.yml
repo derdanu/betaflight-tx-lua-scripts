@@ -23,4 +23,4 @@ steps:
 - task: PublishPipelineArtifact@1
   inputs:
     targetPath: '$(Build.SourcesDirectory)/obj'
-    artifact: 'betalight-tx-lua-derdanu-b$(Build.BuildId)'
+    artifact: 'betaflight-tx-lua-derdanu-b$(Build.BuildId)'
