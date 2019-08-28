@@ -6,7 +6,7 @@ pool:
 
 steps:
 - task: Bash@3
-  displayName: Install LUA
+  displayName: Install dependencies
   inputs:
     targetType: 'inline'
     script: |
@@ -14,6 +14,7 @@ steps:
       sudo apt-get install lua5.2
 
 - task: Bash@3  
+  displayName: Compile Source
   inputs:
     targetType: 'inline'
     script: |
@@ -30,5 +31,5 @@ steps:
 
 - task: PublishPipelineArtifact@1
   inputs:
-    targetPath: '$(Pipeline.Workspace)'
-    artifact: 'Luac'
+    targetPath: '$(Build.ArtifactStagingDirectory)/betalight-lua-derdanu-b$(Build.BuildId).zip'
+    artifact: 'betalight-lua-derdanu-b$(Build.BuildId).zip'
