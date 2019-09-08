@@ -1,12 +1,12 @@
 PageFiles = 
 {
+    "vtx.lua",
     "pids1.lua",
     "pids2.lua",
     "rates.lua",
     "pid_advanced.lua",
     "filters.lua",
     "pwm.lua",
-    "vtx.lua",
     "rescue.lua",
     "gpspids.lua",
 }
