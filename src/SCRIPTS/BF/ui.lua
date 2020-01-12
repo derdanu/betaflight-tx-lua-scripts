@@ -1,10 +1,16 @@
+local uiStatus =
+{
+    init     = 1,
+    pages    = 2,
+    mainMenu = 3,
+}
+
 local pageStatus =
 {
     display     = 2,
     editing     = 3,
     saving      = 4,
     popupMenu   = 5,
-    mainMenu    = 6,
 }
 
 local uiMsp =
@@ -13,24 +19,24 @@ local uiMsp =
     eepromWrite = 250
 }
 
-local menuLine = 1
-local currentState = pageStatus.mainMenu
+local uiState = uiStatus.init
+local pageState = pageStatus.display
 local requestTimeout = 80 -- 800ms request timeout
 local currentPage = 1
-local currentLine = 1
+local currentField = 1
 local saveTS = 0
 local saveTimeout = 0
 local saveRetries = 0
 local saveMaxRetries = 0
-local pageRequested = false
-local telemetryScreenActive = false
 local popupMenuActive = false
 local lastRunTS = 0
 local killEnterBreak = 0
-local stopDisplay = true
-local scrollPixelsY = 0
-
+local stopDisplay = false
+local pageScrollY = 0
+local mainMenuScrollY = 0
+local PageFiles = nil
 local Page = nil
+local background = nil
 
 local backgroundFill = TEXT_BGCOLOR or ERASE
 local foregroundColor = LINE_COLOR or SOLID
@@ -39,20 +45,16 @@ local globalTextOptions = TEXT_COLOR or 0
 
 local function saveSettings(new)
     if Page.values then
+        local payload = Page.values
         if Page.preSave then
             payload = Page.preSave(Page)
-        else
-            payload = {}
-            for i=1,(Page.outputBytes or #Page.values) do
-                payload[i] = Page.values[i]
-            end
         end
         protocol.mspWrite(Page.write, payload)
         saveTS = getTime()
-        if currentState == pageStatus.saving then
+        if pageState == pageStatus.saving then
             saveRetries = saveRetries + 1
         else
-            currentState = pageStatus.saving
+            pageState = pageStatus.saving
             saveRetries = 0
             saveMaxRetries = protocol.saveMaxRetries or 2 -- default 2
             saveTimeout = protocol.saveTimeout or 150     -- default 1.5s
@@ -62,8 +64,9 @@ end
 
 local function invalidatePages()
     Page = nil
-    currentState = pageStatus.display
+    pageState = pageStatus.display
     saveTS = 0
+    collectgarbage()
 end
 
 local function rebootFc()
@@ -94,13 +97,15 @@ local function processMspReply(cmd,rx_buf)
     if cmd == nil or rx_buf == nil then
         return
     end
+    if Page == nil then
+        return
+    end
     if cmd == Page.write then
         if Page.eepromWrite then
             eepromWrite()
         else
             invalidatePages()
         end
-        pageRequested = false
         return
     end
     if cmd == uiMsp.eepromWrite then
@@ -114,11 +119,7 @@ local function processMspReply(cmd,rx_buf)
         return
     end
     if #(rx_buf) > 0 then
-        Page.values = {}
-        for i=1,#(rx_buf) do
-            Page.values[i] = rx_buf[i]
-        end
-
+        Page.values = rx_buf
         for i=1,#(Page.fields) do
             if (#(Page.values) or 0) >= Page.minBytes then
                 local f = Page.fields[i]
@@ -143,19 +144,28 @@ local function incMax(val, inc, base)
     return ((val + inc + base - 1) % base) + 1
 end
 
+function clipValue(val,min,max)
+    if val < min then
+        val = min
+    elseif val > max then
+        val = max
+    end
+    return val
+end
+
 local function incPage(inc)
     currentPage = incMax(currentPage, inc, #(PageFiles))
     Page = nil
-    currentLine = 1
+    currentField = 1
     collectgarbage()
 end
 
-local function incLine(inc)
-    currentLine = clipValue(currentLine + inc, 1, #(Page.fields))
+local function incField(inc)
+    currentField = clipValue(currentField + inc, 1, #(Page.fields))
 end
 
 local function incMainMenu(inc)
-    menuLine = clipValue(menuLine + inc, 1, #(PageFiles))
+    currentPage = clipValue(currentPage + inc, 1, #PageFiles)
 end
 
 local function incPopupMenu(inc)
@@ -169,7 +179,7 @@ local function requestPage()
     end
 end
 
-function drawScreenTitle(screen_title)
+local function drawScreenTitle(screen_title)
     if radio.resolution == lcdResolution.low then
         lcd.drawFilledRectangle(0, 0, LCD_W, 10)
         lcd.drawText(1,1,screen_title,INVERS)
@@ -180,48 +190,35 @@ function drawScreenTitle(screen_title)
 end
 
 local function drawScreen()
-    local yMinLim = Page.yMinLimit or 0
-    local yMaxLim = Page.yMaxLimit or LCD_H
-    local currentLineY = Page.fields[currentLine].y
-    local screen_title = Page.title
-    drawScreenTitle("Betaflight / "..screen_title)
-    if currentLineY <= Page.fields[1].y then
-        scrollPixelsY = 0
-    elseif currentLineY - scrollPixelsY <= yMinLim then
-        scrollPixelsY = currentLineY - yMinLim
-    elseif currentLineY - scrollPixelsY >= yMaxLim then
-        scrollPixelsY = currentLineY - yMaxLim
+    local yMinLim = radio.yMinLimit or 0
+    local yMaxLim = radio.yMaxLimit or LCD_H
+    local currentFieldY = Page.fields[currentField].y
+    local screenTitle = Page.title
+    local textOptions = radio.textSize + globalTextOptions
+    drawScreenTitle("Betaflight / "..screenTitle)
+    if currentFieldY <= Page.fields[1].y then
+        pageScrollY = 0
+    elseif currentFieldY - pageScrollY <= yMinLim then
+        pageScrollY = currentFieldY - yMinLim
+    elseif currentFieldY - pageScrollY >= yMaxLim then
+        pageScrollY = currentFieldY - yMaxLim
     end
-    for i=1,#(Page.text) do
-        local f = Page.text[i]
-        local textOptions = (f.to or 0) + globalTextOptions
-        if (f.y - scrollPixelsY) >= yMinLim and (f.y - scrollPixelsY) <= yMaxLim then
-            lcd.drawText(f.x, f.y - scrollPixelsY, f.t, textOptions)
+    for i=1,#(Page.labels) do
+        local f = Page.labels[i]
+        if (f.y - pageScrollY) >= yMinLim and (f.y - pageScrollY) <= yMaxLim then
+            lcd.drawText(f.x, f.y - pageScrollY, f.t, textOptions)
         end
     end
     local val = "---"
     for i=1,#(Page.fields) do
         local f = Page.fields[i]
-        local text_options = (f.to or 0) + globalTextOptions
-        local heading_options = text_options
-        local value_options = text_options
-        if i == currentLine then
-            value_options = text_options + INVERS
-            if currentState == pageStatus.editing then
-                value_options = value_options + BLINK
+        local valueOptions = textOptions
+        if i == currentField then
+            valueOptions = valueOptions + INVERS
+            if pageState == pageStatus.editing then
+                valueOptions = valueOptions + BLINK
             end
-        end
-        local spacing = 20
-        if f.t ~= nil then
-            if (f.y - scrollPixelsY) >= yMinLim and (f.y - scrollPixelsY) <= yMaxLim then
-                lcd.drawText(f.x, f.y - scrollPixelsY, f.t, heading_options)
-            end
-            if f.sp ~= nil then
-                spacing = f.sp
-            end
-        else
-            spacing = 0
-        end
+        end 
         if f.value then
             if f.upd and Page.values then
                 f.upd(Page)
@@ -231,31 +228,20 @@ local function drawScreen()
                 val = f.table[f.value]
             end
         end
-        if (f.y - scrollPixelsY) >= yMinLim and (f.y - scrollPixelsY) <= yMaxLim then
-            lcd.drawText(f.x + spacing, f.y - scrollPixelsY, val, value_options)
+        if (f.y - pageScrollY) >= yMinLim and (f.y - pageScrollY) <= yMaxLim then
+            if f.t then
+                lcd.drawText(f.x, f.y - pageScrollY, f.t, textOptions)
+            end
+            lcd.drawText(f.sp or f.x, f.y - pageScrollY, val, valueOptions)
         end
     end
 end
 
-function clipValue(val,min,max)
-    if val < min then
-        val = min
-    elseif val > max then
-        val = max
-    end
-    return val
-end
-
-local function getCurrentField()
-    return Page.fields[currentLine]
-end
-
 local function incValue(inc)
-    local f = Page.fields[currentLine]
-    local idx = f.i or currentLine
+    local f = Page.fields[currentField]
     local scale = (f.scale or 1)
     local mult = (f.mult or 1)
-    f.value = clipValue(f.value + ((inc*mult)/scale), (f.min/scale) or 0, (f.max/scale) or 255)
+    f.value = clipValue(f.value + ((inc*mult)/scale), ((f.min or 0)/scale), ((f.max or 255)/scale))
     f.value = math.floor((f.value*scale)/mult + 0.5)/(scale/mult)
     for idx=1, #(f.vals) do
         Page.values[f.vals[idx]] = bit32.rshift(math.floor(f.value*scale + 0.5), (idx-1)*8)
@@ -266,11 +252,11 @@ local function incValue(inc)
 end
 
 local function drawPopupMenu()
-    local x = MenuBox.x
-    local y = MenuBox.y
-    local w = MenuBox.w
-    local h_line = MenuBox.h_line
-    local h_offset = MenuBox.h_offset
+    local x = radio.MenuBox.x
+    local y = radio.MenuBox.y
+    local w = radio.MenuBox.w
+    local h_line = radio.MenuBox.h_line
+    local h_offset = radio.MenuBox.h_offset
     local h = #(popupMenuList) * h_line + h_offset*2
 
     lcd.drawFilledRectangle(x,y,w,h,backgroundFill)
@@ -282,165 +268,182 @@ local function drawPopupMenu()
         if popupMenuActive == i then
             text_options = text_options + INVERS
         end
-        lcd.drawText(x+MenuBox.x_offset,y+(i-1)*h_line+h_offset,e.t,text_options)
+        lcd.drawText(x+radio.MenuBox.x_offset,y+(i-1)*h_line+h_offset,e.t,text_options)
     end
 end
 
-function run_ui(event)
+local function run_ui(event)
     local now = getTime()
     -- if lastRunTS old than 500ms
     if lastRunTS + 50 < now then
         invalidatePages()
-        if isTelemetryScript then
-            currentState = pageStatus.display
-        else
-            currentState = pageStatus.mainMenu
-        end
+        uiState = uiStatus.init
     end
     lastRunTS = now
-    if (currentState == pageStatus.saving) then
-        if (saveTS + saveTimeout < now) then
-            if saveRetries < saveMaxRetries then
-                saveSettings()
-            else
-                -- max retries reached
-                currentState = pageStatus.display
-                invalidatePages()
+    if uiState == uiStatus.init then
+        local yMinLim = radio.yMinLimit
+        lcd.clear()
+        drawScreenTitle("Betaflight Config", 0, 0)
+        lcd.drawText(6, yMinLim, "Initialising")
+        if apiVersion == 0 then
+            if not background then
+                background = assert(loadScript("/SCRIPTS/BF/background.lua"))()
             end
-        end
-    end
-    -- process send queue
-    mspProcessTxQ()
-    -- navigation
-    if isTelemetryScript and event == EVT_VIRTUAL_MENU_LONG then -- telemetry script
-        popupMenuActive = 1
-        currentState = pageStatus.popupMenu
-    elseif (not isTelemetryScript) and event == EVT_VIRTUAL_ENTER_LONG then -- standalone
-        popupMenuActive = 1
-        killEnterBreak = 1
-        currentState = pageStatus.popupMenu
-    -- menu is currently displayed
-    elseif currentState == pageStatus.popupMenu then
-        if event == EVT_VIRTUAL_EXIT then
-            currentState = pageStatus.display
-        elseif event == EVT_VIRTUAL_PREV then
-            incPopupMenu(-1)
-        elseif event == EVT_VIRTUAL_NEXT then
-            incPopupMenu(1)
-        elseif event == EVT_VIRTUAL_ENTER then
-            if killEnterBreak == 1 then
-                killEnterBreak = 0
-            else
-                currentState = pageStatus.display
-                popupMenuList[popupMenuActive].f()
-            end
-        end
-    -- normal page viewing
-    elseif currentState <= pageStatus.display then
-        if not isTelemetryScript and event == EVT_VIRTUAL_PREV_PAGE then
-            incPage(-1)
-            killEvents(event) -- X10/T16 issue: pageUp is a long press
-        elseif (not isTelemetryScript and event == EVT_VIRTUAL_NEXT_PAGE) or (isTelemetryScript and event == EVT_VIRTUAL_MENU) then
-            incPage(1)
-        elseif event == EVT_VIRTUAL_PREV or event == EVT_VIRTUAL_PREV_REPT then
-            incLine(-1)
-        elseif event == EVT_VIRTUAL_NEXT or event == EVT_VIRTUAL_NEXT_REPT then
-            incLine(1)
-        elseif event == EVT_VIRTUAL_ENTER then
-            local field = Page.fields[currentLine]
-            local idx = field.i or currentLine
-            if Page.values and Page.values[idx] and (field.ro ~= true) then
-                currentState = pageStatus.editing
-            end
-        elseif event == EVT_VIRTUAL_EXIT then
-            if isTelemetryScript then 
-                return protocol.exitFunc();
-            else
-                stopDisplay = true
-            end
-        end
-    -- editing value
-    elseif currentState == pageStatus.editing then
-        if event == EVT_VIRTUAL_EXIT or event == EVT_VIRTUAL_ENTER then
-            currentState = pageStatus.display
-        elseif event == EVT_VIRTUAL_INC or event == EVT_VIRTUAL_INC_REPT then
-            incValue(1)
-        elseif event == EVT_VIRTUAL_DEC or event == EVT_VIRTUAL_DEC_REPT then
-            incValue(-1)
-            killEvents(event)
-        end
-    end
-    local nextPage = currentPage
-    while Page == nil do
-    Page = assert(loadScript(radio.templateHome .. PageFiles[currentPage].script))()
-        if Page.requiredVersion and apiVersion > 0 and Page.requiredVersion > apiVersion then
-            incPage(1)
-
-            if currentPage == nextPage then
-                lcd.clear()
-                lcd.drawText(NoTelem[1], NoTelem[2], "No Pages! API: " .. apiVersion, NoTelem[4])
-
-                return 1
-            end
-        end
-    end
-    if not Page.values and currentState == pageStatus.display then
-        requestPage()
-    end
-    lcd.clear()
-    if TEXT_BGCOLOR then
-        lcd.drawFilledRectangle(0, 0, LCD_W, LCD_H, TEXT_BGCOLOR)
-    end
-    drawScreen()
-    if protocol.rssi() == 0 then
-        lcd.drawText(NoTelem[1],NoTelem[2],NoTelem[3],NoTelem[4])
-    end
-    if currentState == pageStatus.popupMenu then
-        drawPopupMenu()
-    elseif currentState == pageStatus.saving then
-        lcd.drawFilledRectangle(SaveBox.x,SaveBox.y,SaveBox.w,SaveBox.h,backgroundFill)
-        lcd.drawRectangle(SaveBox.x,SaveBox.y,SaveBox.w,SaveBox.h,SOLID)
-        if saveRetries <= 0 then
-            lcd.drawText(SaveBox.x+SaveBox.x_offset,SaveBox.y+SaveBox.h_offset,"Saving...",DBLSIZE + BLINK + (globalTextOptions))
+            background()
+            return 0
         else
-            lcd.drawText(SaveBox.x+SaveBox.x_offset,SaveBox.y+SaveBox.h_offset,"Retrying",DBLSIZE + (globalTextOptions))
+            background = nil
+            PageFiles = assert(loadScript("/SCRIPTS/BF/pages.lua"))()
+            invalidatePages()
+            if isTelemetryScript then
+                uiState = uiStatus.pages
+            else
+                uiState = uiStatus.mainMenu
+            end
         end
-    end
-    if currentState == pageStatus.mainMenu and (not isTelemetryScript) then
+    elseif uiState == uiStatus.mainMenu then
         if event == EVT_VIRTUAL_EXIT then
             return 2
         elseif event == EVT_VIRTUAL_NEXT then
             incMainMenu(1)
         elseif event == EVT_VIRTUAL_PREV then
             incMainMenu(-1)
+        elseif event == EVT_VIRTUAL_ENTER then
+            pageState = pageStatus.display
+            uiState = uiStatus.pages
         end
         lcd.clear()
-        lcd.drawScreenTitle("Betaflight Config", 0, 0)
+        drawScreenTitle("Betaflight Config", 0, 0)
+        local yMinLim = radio.yMinLimit
+        local yMaxLim = radio.yMaxLimit
+        local lineSpacing = 10
+        if radio.resolution == lcdResolution.high then
+            lineSpacing = 25
+        end
+        local currentFieldY = (currentPage-1)*lineSpacing + yMinLim
+        if currentFieldY <= yMinLim then
+            mainMenuScrollY = 0
+        elseif currentFieldY - mainMenuScrollY <= yMinLim then
+            mainMenuScrollY = currentFieldY - yMinLim
+        elseif currentFieldY - mainMenuScrollY >= yMaxLim then
+            mainMenuScrollY = currentFieldY - yMaxLim
+        end
         for i=1, #PageFiles do
-            local yMinLim = 10
-            local yMaxLim = LCD_H - 8
-            local currentLineY = (menuLine-1)*8 + yMinLim
-            if currentLineY <= yMaxLim then
-                scrollPixelsY = 0
-            elseif currentLineY - scrollPixelsY <= yMinLim then
-                scrollPixelsY = currentLineY - yMinLim*2
-            elseif currentLineY - scrollPixelsY >= yMaxLim then
-                scrollPixelsY = currentLineY - yMaxLim + 6
-            end
-            local attr = (menuLine == i and INVERS or 0)
-            if event == EVT_VIRTUAL_ENTER and attr == INVERS then
-                Page = assert(loadScript(radio.templateHome .. PageFiles[i].script))()
-                currentPage = i
-                currentState = pageStatus.display   
-            end
-            if ((i-1)*8 + yMinLim - scrollPixelsY) >= yMinLim and ((i-1)*8 + yMinLim - scrollPixelsY) <= yMaxLim then
-                lcd.drawText(6, (i-1)*8 + yMinLim - scrollPixelsY, PageFiles[i].title, attr)
+            local attr = (currentPage == i and INVERS or 0)
+            if ((i-1)*lineSpacing + yMinLim - mainMenuScrollY) >= yMinLim and ((i-1)*lineSpacing + yMinLim - mainMenuScrollY) <= yMaxLim then
+                lcd.drawText(6, (i-1)*lineSpacing + yMinLim - mainMenuScrollY, PageFiles[i].title, attr)
             end
         end
+    elseif uiState == uiStatus.pages then
+        if (pageState == pageStatus.saving) then
+            if (saveTS + saveTimeout < now) then
+                if saveRetries < saveMaxRetries then
+                    saveSettings()
+                else
+                    -- max retries reached
+                    pageState = pageStatus.display
+                    invalidatePages()
+                end
+            end
+        end
+        -- navigation
+        if isTelemetryScript and event == EVT_VIRTUAL_MENU_LONG then -- telemetry script
+            popupMenuActive = 1
+            pageState = pageStatus.popupMenu
+        elseif (not isTelemetryScript) and event == EVT_VIRTUAL_ENTER_LONG then -- standalone
+            popupMenuActive = 1
+            killEnterBreak = 1
+            pageState = pageStatus.popupMenu
+        -- menu is currently displayed
+        elseif pageState == pageStatus.popupMenu then
+            if event == EVT_VIRTUAL_EXIT then
+                pageState = pageStatus.display
+            elseif event == EVT_VIRTUAL_PREV then
+                incPopupMenu(-1)
+            elseif event == EVT_VIRTUAL_NEXT then
+                incPopupMenu(1)
+            elseif event == EVT_VIRTUAL_ENTER then
+                if killEnterBreak == 1 then
+                    killEnterBreak = 0
+                else
+                    pageState = pageStatus.display
+                    popupMenuList[popupMenuActive].f()
+                end
+            end
+        -- normal page viewing
+        elseif pageState <= pageStatus.display then
+            if not isTelemetryScript and event == EVT_VIRTUAL_PREV_PAGE then
+                incPage(-1)
+                killEvents(event) -- X10/T16 issue: pageUp is a long press
+            elseif (not isTelemetryScript and event == EVT_VIRTUAL_NEXT_PAGE) or (isTelemetryScript and event == EVT_VIRTUAL_MENU) then
+                incPage(1)
+            elseif event == EVT_VIRTUAL_PREV or event == EVT_VIRTUAL_PREV_REPT then
+                incField(-1)
+            elseif event == EVT_VIRTUAL_NEXT or event == EVT_VIRTUAL_NEXT_REPT then
+                incField(1)
+            elseif event == EVT_VIRTUAL_ENTER then
+                if Page then
+                    local f = Page.fields[currentField]
+                    if Page.values and Page.values[f.vals[#f.vals]] and not f.ro then
+                        pageState = pageStatus.editing
+                    end
+                end
+            elseif event == EVT_VIRTUAL_EXIT then
+                if isTelemetryScript then 
+                    return protocol.exitFunc();
+                else
+                    stopDisplay = true
+                end
+            end
+        -- editing value
+        elseif pageState == pageStatus.editing then
+            if event == EVT_VIRTUAL_EXIT or event == EVT_VIRTUAL_ENTER then
+                pageState = pageStatus.display
+            elseif event == EVT_VIRTUAL_INC or event == EVT_VIRTUAL_INC_REPT then
+                incValue(1)
+            elseif event == EVT_VIRTUAL_DEC or event == EVT_VIRTUAL_DEC_REPT then
+                incValue(-1)
+            end
+        end
+        if Page == nil then
+            if #PageFiles == 0 then
+                lcd.clear()
+                lcd.drawText(radio.NoTelem[1], radio.NoTelem[2], "No Pages! API: " .. apiVersion, radio.NoTelem[4])
+                return 1
+            end
+            Page = assert(loadScript(SCRIPT_HOME.."/Pages/"..PageFiles[currentPage].script))()
+            collectgarbage()
+        end
+        if not Page.values and pageState == pageStatus.display then
+            requestPage()
+        end
+        lcd.clear()
+        if TEXT_BGCOLOR then
+            lcd.drawFilledRectangle(0, 0, LCD_W, LCD_H, TEXT_BGCOLOR)
+        end
+        drawScreen()
+        if pageState == pageStatus.popupMenu then
+            drawPopupMenu()
+        elseif pageState == pageStatus.saving then
+            lcd.drawFilledRectangle(radio.SaveBox.x,radio.SaveBox.y,radio.SaveBox.w,radio.SaveBox.h,backgroundFill)
+            lcd.drawRectangle(radio.SaveBox.x,radio.SaveBox.y,radio.SaveBox.w,radio.SaveBox.h,SOLID)
+            if saveRetries <= 0 then
+                lcd.drawText(radio.SaveBox.x+radio.SaveBox.x_offset,radio.SaveBox.y+radio.SaveBox.h_offset,"Saving...",DBLSIZE + BLINK + (globalTextOptions))
+            else
+                lcd.drawText(radio.SaveBox.x+radio.SaveBox.x_offset,radio.SaveBox.y+radio.SaveBox.h_offset,"Retrying",DBLSIZE + (globalTextOptions))
+            end
+        end
+        if stopDisplay and (not isTelemetryScript) then
+            invalidatePages()
+            currentField = 1
+            uiState = uiStatus.mainMenu
+            stopDisplay = false
+        end
     end
-    if stopDisplay and (not isTelemetryScript) then
-        currentState = pageStatus.mainMenu
-        stopDisplay = false
+    -- process send queue
+    mspProcessTxQ()
+    if protocol.rssi() == 0 then
+        lcd.drawText(radio.NoTelem[1],radio.NoTelem[2],radio.NoTelem[3],radio.NoTelem[4])
     end
     processMspReply(mspPollReply())
     return 0
